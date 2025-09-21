@@ -10,9 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import {
-  AlertTriangle,
   ArrowUpRight,
-  CalendarRange,
   CloudUpload,
   DownloadCloud,
   FileText,
@@ -57,90 +55,21 @@ import {
   uploadFileToPresignedUrl,
   type PredictionResponse,
   type Transaction,
+  type TransactionStats,
 } from "@/lib/api";
 
-const metrics = [
-  {
-    label: "Total revenue",
-    value: "$182,400",
-    change: "+6.8%",
-    icon: PieChart,
-    trend: "green",
-  },
-  {
-    label: "Operating expenses",
-    value: "$94,120",
-    change: "-3.2%",
-    icon: Layers,
-    trend: "green",
-  },
-  {
-    label: "Net cash",
-    value: "$54,980",
-    change: "+12.4%",
-    icon: Gauge,
-    trend: "green",
-  },
-  {
-    label: "Runway",
-    value: "8.7 months",
-    change: "No change",
-    icon: CalendarRange,
-    trend: "neutral",
-  },
-];
-
 const chartConfig = {
-  cash: {
-    label: "Cash balance",
-    color: "oklch(0.58 0.12 255 / 0.9)",
+  inflow: {
+    label: "Cash inflow",
+    color: "oklch(0.58 0.12 255 / 0.85)",
   },
-  expenses: {
-    label: "Operating expenses",
-    color: "oklch(0.74 0.14 20 / 0.6)",
+  outflow: {
+    label: "Cash outflow",
+    color: "oklch(0.74 0.14 20 / 0.7)",
   },
-};
+} as const;
 
-const chartData = [
-  { month: "Apr", cash: 41000, expenses: 28000 },
-  { month: "May", cash: 45250, expenses: 30000 },
-  { month: "Jun", cash: 49800, expenses: 33200 },
-  { month: "Jul", cash: 54500, expenses: 34800 },
-  { month: "Aug", cash: 58800, expenses: 36900 },
-  { month: "Sep", cash: 63650, expenses: 37500 },
-];
-
-const fallbackInsight = {
-  title: "Cash is tracking ahead of plan",
-  body: "Your cash balance is 12% higher than plan thanks to faster collections from your top three customers.",
-};
-
-const fallbackTransactions: Transaction[] = [
-  {
-    vendor: "GTM Media",
-    category: "Marketing",
-    amount: 18800,
-    date: "2024-08-15",
-  },
-  {
-    vendor: "Segment",
-    category: "Software",
-    amount: 11200,
-    date: "2024-08-12",
-  },
-  {
-    vendor: "First National Bank",
-    category: "Payroll",
-    amount: 41000,
-    date: "2024-08-10",
-  },
-  {
-    vendor: "Ops Collective",
-    category: "Ops",
-    amount: 6500,
-    date: "2024-08-06",
-  },
-];
+const UPLOADS_STORAGE_KEY = "dashboard.uploads";
 
 type UploadStatus = "processing" | "synced" | "failed";
 
@@ -149,22 +78,9 @@ type UploadItem = {
   name: string;
   size: string;
   status: UploadStatus;
+  uploadedAt: string;
+  storageKey: string | null;
 };
-
-const initialUploads: UploadItem[] = [
-  {
-    id: "init-1",
-    name: "august-transactions.csv",
-    size: "2.1 MB",
-    status: "synced",
-  },
-  {
-    id: "init-2",
-    name: "q3-expense-report.pdf",
-    size: "845 KB",
-    status: "synced",
-  },
-];
 
 function formatBytes(bytes: number) {
   const units = ["B", "KB", "MB", "GB"];
@@ -197,14 +113,112 @@ function formatDate(value?: string) {
   return date.toLocaleDateString();
 }
 
+function formatRelativeTime(value?: string) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const diffMs = date.getTime() - Date.now();
+  const diffMinutes = Math.round(diffMs / (1000 * 60));
+
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+  if (Math.abs(diffMinutes) < 60) {
+    return rtf.format(diffMinutes, "minute");
+  }
+
+  const diffHours = Math.round(diffMinutes / 60);
+  if (Math.abs(diffHours) < 24) {
+    return rtf.format(diffHours, "hour");
+  }
+
+  const diffDays = Math.round(diffHours / 24);
+  return rtf.format(diffDays, "day");
+}
+
+function getTransactionAmount(transaction: Transaction) {
+  const amount = transaction.amount ?? transaction.total;
+  if (typeof amount !== "number" || Number.isNaN(amount)) {
+    return null;
+  }
+  return amount;
+}
+
+function buildChartData(transactions: Transaction[]) {
+  const buckets = new Map<string, { inflow: number; outflow: number }>();
+
+  transactions.forEach((transaction) => {
+    const amount = getTransactionAmount(transaction);
+    if (amount === null) return;
+
+    const dateValue = transaction.date ?? transaction.timestamp;
+    if (!dateValue) return;
+
+    const date = new Date(dateValue);
+    if (Number.isNaN(date.getTime())) return;
+
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+      2,
+      "0"
+    )}`;
+
+    const bucket = buckets.get(key) ?? { inflow: 0, outflow: 0 };
+    if (amount >= 0) {
+      bucket.outflow += amount;
+    } else {
+      bucket.inflow += Math.abs(amount);
+    }
+    buckets.set(key, bucket);
+  });
+
+  return Array.from(buckets.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([key, value]) => {
+      const [year, month] = key.split("-").map((part) => Number(part));
+      const labelDate = new Date(year, month - 1);
+      return {
+        month: labelDate.toLocaleString("en-US", {
+          month: "short",
+          year: "numeric",
+        }),
+        inflow: Number(value.inflow.toFixed(2)),
+        outflow: Number(value.outflow.toFixed(2)),
+      };
+    });
+}
+
+function isValidUpload(candidate: unknown): candidate is UploadItem {
+  if (!candidate || typeof candidate !== "object") return false;
+  const value = candidate as Partial<UploadItem>;
+  return (
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.size === "string" &&
+    typeof value.status === "string" &&
+    typeof value.uploadedAt === "string"
+  );
+}
+
+function wait(durationMs: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(() => resolve(), durationMs);
+  });
+}
+
 export function DashboardView() {
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-  const [uploads, setUploads] = React.useState<UploadItem[]>(initialUploads);
+  const uploadsHydratedRef = React.useRef(false);
+  const [uploads, setUploads] = React.useState<UploadItem[]>([]);
   const [isDragging, setIsDragging] = React.useState(false);
   const [isUploading, setIsUploading] = React.useState(false);
 
   const [transactions, setTransactions] = React.useState<Transaction[]>([]);
   const [transactionsLoading, setTransactionsLoading] = React.useState(false);
+  const [transactionStats, setTransactionStats] =
+    React.useState<TransactionStats | null>(null);
+  const [transactionsSummary, setTransactionsSummary] =
+    React.useState<string | null>(null);
 
   const [summary, setSummary] = React.useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = React.useState(false);
@@ -212,13 +226,134 @@ export function DashboardView() {
   const [prediction, setPrediction] = React.useState<PredictionResponse | null>(null);
   const [predictionLoading, setPredictionLoading] = React.useState(false);
 
+  const chartData = React.useMemo(
+    () => buildChartData(transactions),
+    [transactions]
+  );
+
+  const metrics = React.useMemo(
+    () => {
+      const totalTransactions =
+        typeof transactionStats?.total_transactions === "number"
+          ? transactionStats.total_transactions
+          : 0;
+
+      const totalAmount =
+        typeof transactionStats?.total_amount === "number"
+          ? transactionStats.total_amount
+          : null;
+
+      const predictionValue =
+        typeof prediction?.predicted_next_7_days === "number"
+          ? prediction.predicted_next_7_days
+          : typeof prediction?.predicted_inflow === "number"
+          ? prediction.predicted_inflow
+          : null;
+
+      const lastSeven =
+        typeof prediction?.last_7_days_total === "number"
+          ? prediction.last_7_days_total
+          : null;
+
+      const updatedAt = transactionStats?.generated_at
+        ? formatRelativeTime(transactionStats.generated_at)
+        : null;
+
+      const summarySnippet = transactionsSummary
+        ? transactionsSummary.length > 72
+          ? `${transactionsSummary.slice(0, 69)}…`
+          : transactionsSummary
+        : "Upload data to populate totals";
+
+      return [
+        {
+          label: "Transactions processed",
+          value: totalTransactions.toLocaleString(),
+          change: updatedAt ? `Updated ${updatedAt}` : "Awaiting uploads",
+          icon: ListChecks,
+          trend: totalTransactions > 0 ? "green" : "neutral",
+        },
+        {
+          label: "Total amount",
+          value: formatCurrency(totalAmount),
+          change: summarySnippet,
+          icon: PieChart,
+          trend: totalAmount ? "green" : "neutral",
+        },
+        {
+          label: "Top vendor",
+          value: transactionStats?.biggest_vendor ?? "-",
+          change:
+            totalTransactions > 0
+              ? `${totalTransactions} transactions tracked`
+              : "Upload data to identify vendors",
+          icon: Layers,
+          trend: transactionStats?.biggest_vendor ? "green" : "neutral",
+        },
+        {
+          label: "Next 7 day forecast",
+          value: formatCurrency(predictionValue),
+          change:
+            predictionValue !== null && lastSeven !== null
+              ? `Last 7 days: ${formatCurrency(lastSeven)}`
+              : predictionValue !== null
+              ? "Forecast ready"
+              : "Run forecast after uploads",
+          icon: Gauge,
+          trend: predictionValue !== null ? "green" : "neutral",
+        },
+      ];
+    },
+    [prediction, transactionStats, transactionsSummary]
+  );
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    try {
+      const stored = window.localStorage.getItem(UPLOADS_STORAGE_KEY);
+      if (!stored) return;
+      const parsed: unknown = JSON.parse(stored);
+      if (Array.isArray(parsed)) {
+        setUploads(
+          parsed
+            .filter(isValidUpload)
+            .map((item) => ({
+              ...item,
+              status:
+                item.status === "synced" || item.status === "failed"
+                  ? item.status
+                  : "processing",
+              storageKey: item.storageKey ?? null,
+            }))
+        );
+      }
+    } catch (error) {
+      console.warn("Failed to restore uploads from storage", error);
+    } finally {
+      uploadsHydratedRef.current = true;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!uploadsHydratedRef.current || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        UPLOADS_STORAGE_KEY,
+        JSON.stringify(uploads)
+      );
+    } catch (error) {
+      console.warn("Failed to persist uploads to storage", error);
+    }
+  }, [uploads]);
+
   const refreshTransactions = React.useCallback(async () => {
     setTransactionsLoading(true);
     try {
       const data = await listTransactions();
-      if (Array.isArray(data)) {
-        setTransactions(data);
-      }
+      setTransactions(data.transactions);
+      setTransactionStats(data.stats);
+      setTransactionsSummary(data.summary);
     } catch (error) {
       console.error("Failed to fetch transactions", error);
     } finally {
@@ -230,10 +365,10 @@ export function DashboardView() {
     setSummaryLoading(true);
     try {
       const data = await fetchSummary();
-      if (data?.summary) {
+      if (data.summary) {
         setSummary(data.summary);
       }
-      if (Array.isArray(data?.transactions) && transactions.length === 0) {
+      if (data.transactions.length) {
         setTransactions(data.transactions);
       }
     } catch (error) {
@@ -241,7 +376,7 @@ export function DashboardView() {
     } finally {
       setSummaryLoading(false);
     }
-  }, [transactions.length]);
+  }, []);
 
   const refreshPrediction = React.useCallback(
     async (sourceTransactions?: Transaction[]) => {
@@ -281,7 +416,9 @@ export function DashboardView() {
       id: crypto.randomUUID(),
       name: file.name,
       size: formatBytes(file.size),
-      status: "processing",
+      status: "processing" as UploadStatus,
+      uploadedAt: new Date().toISOString(),
+      storageKey: null,
     }));
 
     setUploads((prev) => [...stagedItems, ...prev]);
@@ -291,18 +428,25 @@ export function DashboardView() {
       stagedItems.map(async (item, index) => {
         const file = fileArray[index];
         try {
-          const uploadUrl = await requestUploadUrl(
+          const { uploadUrl, key } = await requestUploadUrl(
             file.name,
             file.type || "application/octet-stream"
           );
           await uploadFileToPresignedUrl(uploadUrl, file);
           setUploads((prev) =>
             prev.map((upload) =>
-              upload.id === item.id ? { ...upload, status: "synced" } : upload
+              upload.id === item.id
+                ? {
+                    ...upload,
+                    status: "synced" as UploadStatus,
+                    uploadedAt: new Date().toISOString(),
+                    storageKey: key ?? upload.storageKey,
+                  }
+                : upload
             )
           );
           toast.success("Upload complete", {
-            description: `${file.name} synced to S3`,
+            description: `${file.name} uploaded and queued for processing`,
           });
         } catch (error) {
           console.error("Upload failed", error);
@@ -311,7 +455,9 @@ export function DashboardView() {
           });
           setUploads((prev) =>
             prev.map((upload) =>
-              upload.id === item.id ? { ...upload, status: "failed" } : upload
+              upload.id === item.id
+                ? { ...upload, status: "failed" as UploadStatus }
+                : upload
             )
           );
         }
@@ -319,36 +465,41 @@ export function DashboardView() {
     );
 
     setIsUploading(false);
-    setTimeout(() => {
-      refreshTransactions();
-      refreshSummary();
-    }, 400);
+
+    await wait(1500);
+    await refreshTransactions();
+    await refreshSummary();
   }
 
   function onDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDragging(false);
-    handleFileQueue(event.dataTransfer.files);
+    void handleFileQueue(event.dataTransfer.files);
   }
 
-  const displaySummaryTitle = summary ? "Latest insight" : fallbackInsight.title;
-  const displaySummaryBody = summary ?? fallbackInsight.body;
+  const displaySummaryTitle = summary
+    ? "Latest insight"
+    : "Summary will appear after processing";
+  const displaySummaryBody =
+    summary ??
+    transactionsSummary ??
+    "Upload a financial statement to generate an AI summary.";
 
-  const transactionsToShow: Transaction[] =
-    transactions.length > 0 ? transactions.slice(0, 6) : fallbackTransactions;
+  const transactionsToShow: Transaction[] = transactions.slice(0, 6);
+  const hasUploads = uploads.length > 0;
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-12">
       <div className="flex flex-col gap-4 border-b border-border/60 pb-6 md:flex-row md:items-end md:justify-between">
         <div className="space-y-2">
           <Badge className="rounded-full bg-primary/10 text-primary">
-            Dashboard preview
+            Live AWS data
           </Badge>
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
             Finance control center
           </h1>
           <p className="text-muted-foreground text-sm sm:text-base">
-            Plug in auth, S3, and Bedrock later. The experience already guides users through uploads, AI summaries, and forecasting.
+            Upload statements, trigger OCR, and review summaries pulled from your AWS Lambdas.
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -409,64 +560,76 @@ export function DashboardView() {
               <CardHeader className="pb-2">
                 <CardTitle className="flex items-center gap-2 text-base font-semibold">
                   <PieChart className="size-4 text-primary" />
-                  Cash and expense trend
+                  Cash trend
                 </CardTitle>
                 <CardDescription>
-                  Charts render demo data today. Swap the dataset with live backend responses when ready.
+                  Groups uploaded transactions by month. Inflows are shown against outgoing spend.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <ChartContainer className="h-64 w-full" config={chartConfig}>
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient id="area-cash" x1="0" x2="0" y1="0" y2="1">
-                        <stop
-                          offset="10%"
-                          stopColor="oklch(0.58 0.12 255)"
-                          stopOpacity={0.35}
-                        />
-                        <stop
-                          offset="95%"
-                          stopColor="oklch(0.58 0.12 255)"
-                          stopOpacity={0.05}
-                        />
-                      </linearGradient>
-                      <linearGradient id="area-expenses" x1="0" x2="0" y1="0" y2="1">
-                        <stop
-                          offset="10%"
-                          stopColor="oklch(0.74 0.14 20)"
-                          stopOpacity={0.3}
-                        />
-                        <stop
-                          offset="95%"
-                          stopColor="oklch(0.74 0.14 20)"
-                          stopOpacity={0.08}
-                        />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                    <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                    <YAxis
-                      tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
-                      width={60}
-                    />
-                    <Tooltip cursor={false} content={<ChartTooltipContent />} />
-                    <Area
-                      type="monotone"
-                      dataKey="cash"
-                      stroke="oklch(0.58 0.12 255)"
-                      strokeWidth={2.5}
-                      fill="url(#area-cash)"
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="expenses"
-                      stroke="oklch(0.74 0.14 20)"
-                      strokeWidth={2}
-                      fill="url(#area-expenses)"
-                    />
-                  </AreaChart>
-                </ChartContainer>
+                {chartData.length ? (
+                  <ChartContainer className="h-64 w-full" config={chartConfig}>
+                    <AreaChart data={chartData}>
+                      <defs>
+                        <linearGradient id="area-inflow" x1="0" x2="0" y1="0" y2="1">
+                          <stop
+                            offset="10%"
+                            stopColor="oklch(0.58 0.12 255)"
+                            stopOpacity={0.35}
+                          />
+                          <stop
+                            offset="95%"
+                            stopColor="oklch(0.58 0.12 255)"
+                            stopOpacity={0.05}
+                          />
+                        </linearGradient>
+                        <linearGradient
+                          id="area-outflow"
+                          x1="0"
+                          x2="0"
+                          y1="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="10%"
+                            stopColor="oklch(0.74 0.14 20)"
+                            stopOpacity={0.3}
+                          />
+                          <stop
+                            offset="95%"
+                            stopColor="oklch(0.74 0.14 20)"
+                            stopOpacity={0.08}
+                          />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                      <XAxis dataKey="month" tickLine={false} axisLine={false} />
+                      <YAxis
+                        tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+                        width={60}
+                      />
+                      <Tooltip cursor={false} content={<ChartTooltipContent />} />
+                      <Area
+                        type="monotone"
+                        dataKey="inflow"
+                        stroke="oklch(0.58 0.12 255)"
+                        strokeWidth={2.5}
+                        fill="url(#area-inflow)"
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="outflow"
+                        stroke="oklch(0.74 0.14 20)"
+                        strokeWidth={2}
+                        fill="url(#area-outflow)"
+                      />
+                    </AreaChart>
+                  </ChartContainer>
+                ) : (
+                  <div className="flex h-64 items-center justify-center rounded-2xl border border-dashed border-border/70 text-sm text-muted-foreground">
+                    Upload a statement to render the cash trend.
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -477,7 +640,7 @@ export function DashboardView() {
                   AI summary (API connected)
                 </CardTitle>
                 <CardDescription>
-                  Generates via AWS Bedrock once wired. Button below calls the `/summary` endpoint.
+                  Fetches the latest Bedrock summary from the `/summary` Lambda and refreshes on demand.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -511,7 +674,7 @@ export function DashboardView() {
                   Upload financial data
                 </CardTitle>
                 <CardDescription>
-                  Drag files into the dropzone. The frontend now hits `/upload-url` to get a presigned S3 URL.
+                  Drag files into the dropzone. Each upload requests `/upload-url`, streams to S3, and triggers OCR parsing.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -531,7 +694,7 @@ export function DashboardView() {
                   <div>
                     <p className="font-medium">Drop or click to upload</p>
                     <p className="text-muted-foreground">
-                      CSV, PDF, XLSX up to 10 MB. We’ll stream to S3 once wired.
+                      CSV, PDF, XLSX up to 10&nbsp;MB. Files sync directly to your AWS bucket.
                     </p>
                   </div>
                   <Button
@@ -548,63 +711,51 @@ export function DashboardView() {
                     multiple
                     className="hidden"
                     onChange={(event) => {
-                      handleFileQueue(event.target.files);
+                      void handleFileQueue(event.target.files);
                       event.target.value = "";
                     }}
                   />
                 </div>
                 <div className="mt-6 space-y-3 text-sm">
-                  {uploads.map((upload) => (
-                    <div
-                      key={upload.id}
-                      className="flex items-center justify-between rounded-xl border border-border/60 bg-background/80 px-4 py-3"
-                    >
-                      <div>
-                        <p className="font-medium">{upload.name}</p>
-                        <p className="text-xs text-muted-foreground">{upload.size}</p>
-                      </div>
-                      <Badge
-                        className={cn(
-                          "rounded-full px-3 py-1 text-xs",
-                          upload.status === "synced" &&
-                            "bg-emerald-500/15 text-emerald-600",
-                          upload.status === "processing" &&
-                            "bg-primary/10 text-primary",
-                          upload.status === "failed" &&
-                            "bg-destructive/10 text-destructive"
-                        )}
+                  {hasUploads ? (
+                    uploads.map((upload) => (
+                      <div
+                        key={upload.id}
+                        className="flex items-center justify-between rounded-xl border border-border/60 bg-background/80 px-4 py-3"
                       >
-                        {upload.status === "synced"
-                          ? "Synced"
-                          : upload.status === "failed"
-                          ? "Failed"
-                          : "Processing"}
-                      </Badge>
+                        <div>
+                          <p className="font-medium">{upload.name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {upload.size}
+                            {upload.uploadedAt
+                              ? ` • ${formatRelativeTime(upload.uploadedAt)}`
+                              : null}
+                          </p>
+                        </div>
+                        <Badge
+                          className={cn(
+                            "rounded-full px-3 py-1 text-xs",
+                            upload.status === "synced" &&
+                              "bg-emerald-500/15 text-emerald-600",
+                            upload.status === "processing" &&
+                              "bg-primary/10 text-primary",
+                            upload.status === "failed" &&
+                              "bg-destructive/10 text-destructive"
+                          )}
+                        >
+                          {upload.status === "synced"
+                            ? "Synced"
+                            : upload.status === "failed"
+                            ? "Failed"
+                            : "Processing"}
+                        </Badge>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-border/60 px-4 py-6 text-center text-xs text-muted-foreground">
+                      No uploads yet. Add a statement to populate the dashboard.
                     </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="border border-border/60 bg-background/70">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                  <AlertTriangle className="size-4 text-primary" />
-                  Action items
-                </CardTitle>
-                <CardDescription>
-                  Suggested follow-ups generated from today’s data load.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4 text-sm">
-                <div className="rounded-2xl bg-secondary/60 p-4">
-                  Review vendor contract ending Nov 30. Savings forecast: $2.4k/month.
-                </div>
-                <div className="rounded-2xl bg-secondary/60 p-4">
-                  Sync payroll journal entries to QuickBooks once API is ready.
-                </div>
-                <div className="rounded-2xl bg-secondary/60 p-4">
-                  Export tax-ready packet for CPA review in December.
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -619,7 +770,7 @@ export function DashboardView() {
                 Latest transactions
               </CardTitle>
               <CardDescription>
-                Pulled directly from `/transactions`. Replace with richer analytics when ready.
+                Pulled directly from `/transactions`. Select an upload to see what OCR extracted.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -639,7 +790,7 @@ export function DashboardView() {
                         <Skeleton className="h-6 w-full" />
                       </TableCell>
                     </TableRow>
-                  ) : (
+                  ) : transactionsToShow.length ? (
                     transactionsToShow.map((transaction, index) => (
                       <TableRow key={`${transaction.id ?? transaction.vendor ?? "row"}-${index}`}>
                         <TableCell>
@@ -660,47 +811,15 @@ export function DashboardView() {
                         </TableCell>
                       </TableRow>
                     ))
+                  ) : (
+                    <TableRow>
+                      <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
+                        No transactions yet. Upload a file to populate this table.
+                      </TableCell>
+                    </TableRow>
                   )}
                 </TableBody>
               </Table>
-            </CardContent>
-          </Card>
-
-          <Card className="border border-border/60 bg-background/70">
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                <ShieldCheck className="size-4 text-primary" />
-                Policy checks ready
-              </CardTitle>
-              <CardDescription>
-                Pending integration with Bedrock moderation or custom Lambda for controls.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 text-sm sm:grid-cols-2">
-              <div className="rounded-2xl border border-border/60 bg-secondary/50 p-4">
-                <p className="font-medium">Duplicate detection</p>
-                <p className="text-muted-foreground">
-                  3 possible duplicates flagged for marketing receipts.
-                </p>
-              </div>
-              <div className="rounded-2xl border border-border/60 bg-secondary/50 p-4">
-                <p className="font-medium">Policy variance</p>
-                <p className="text-muted-foreground">
-                  Meals policy exceeded in two transactions this week.
-                </p>
-              </div>
-              <div className="rounded-2xl border border-border/60 bg-secondary/50 p-4">
-                <p className="font-medium">Sales tax review</p>
-                <p className="text-muted-foreground">
-                  4 invoices missing tax codes. Placeholder for automated review service.
-                </p>
-              </div>
-              <div className="rounded-2xl border border-border/60 bg-secondary/50 p-4">
-                <p className="font-medium">Receipt coverage</p>
-                <p className="text-muted-foreground">
-                  98% categorized with attached evidence. Link storage to S3 bucket later.
-                </p>
-              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -734,27 +853,35 @@ export function DashboardView() {
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div className="rounded-2xl bg-secondary/60 p-4">
                     <p className="text-xs uppercase text-muted-foreground">
-                      Predicted inflow
+                      Next 7 days
                     </p>
                     <p className="text-lg font-semibold">
-                      {formatCurrency(prediction.predicted_inflow)}
+                      {formatCurrency(
+                        typeof prediction.predicted_next_7_days === "number"
+                          ? prediction.predicted_next_7_days
+                          : prediction.predicted_inflow ?? null
+                      )}
                     </p>
                   </div>
                   <div className="rounded-2xl bg-secondary/60 p-4">
                     <p className="text-xs uppercase text-muted-foreground">
-                      Predicted outflow
+                      Last 7 days total
                     </p>
                     <p className="text-lg font-semibold">
-                      {formatCurrency(prediction.predicted_outflow)}
+                      {formatCurrency(prediction.last_7_days_total)}
                     </p>
                   </div>
                   <div className="rounded-2xl bg-secondary/60 p-4">
-                    <p className="text-xs uppercase text-muted-foreground">Net</p>
+                    <p className="text-xs uppercase text-muted-foreground">
+                      Transactions counted
+                    </p>
                     <p className="text-lg font-semibold">
-                      {formatCurrency(prediction.net)}
+                      {typeof prediction.transaction_count === "number"
+                        ? prediction.transaction_count.toLocaleString()
+                        : "-"}
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      Period: {prediction.period ?? "next period"}
+                      Period: {prediction.period ?? "Next 7 days"}
                     </p>
                   </div>
                 </div>
@@ -763,44 +890,6 @@ export function DashboardView() {
                   Forecast data will appear here as soon as the backend returns a response.
                 </div>
               )}
-            </CardContent>
-          </Card>
-
-          <Card className="border border-border/60 bg-background/70">
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                <ArrowUpRight className="size-4 text-primary" />
-                Budget scenarios
-              </CardTitle>
-              <CardDescription>
-                Swap the static data with your forecasting endpoint. We already handle scenario toggles and messaging.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 text-sm sm:grid-cols-2">
-              <div className="rounded-2xl bg-secondary/60 p-4">
-                <p className="font-medium">Conservative</p>
-                <p className="text-muted-foreground">
-                  Slower hiring extends runway to 10.4 months with 4% ARR growth.
-                </p>
-              </div>
-              <div className="rounded-2xl bg-secondary/60 p-4">
-                <p className="font-medium">Balanced</p>
-                <p className="text-muted-foreground">
-                  Maintain current plan and hold a 2.3 month buffer over baseline.
-                </p>
-              </div>
-              <div className="rounded-2xl bg-secondary/60 p-4">
-                <p className="font-medium">Aggressive</p>
-                <p className="text-muted-foreground">
-                  Increase GTM spend by 15% to target 9% ARR growth. Watch cash dip in March.
-                </p>
-              </div>
-              <div className="rounded-2xl bg-secondary/60 p-4">
-                <p className="font-medium">AI recommendation</p>
-                <p className="text-muted-foreground">
-                  Delay non-critical capex until Q2 to preserve $78k in cash.
-                </p>
-              </div>
             </CardContent>
           </Card>
         </TabsContent>
